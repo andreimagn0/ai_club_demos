@@ -3,15 +3,17 @@ import base64
 import time
 import requests
 import json  # Import the correct JSON module
+import os
+from datetime import datetime
 
 # Function to capture image from webcam
 def capture_image():
     # Open the webcam with DSHOW backend (use MSMF if DSHOW doesn't work)
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
-    # Set camera resolution (you can adjust these values)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    # Set camera resolution to Full HD (1920x1080)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
     # Allow the camera time to initialize (2 seconds)
     time.sleep(2)
@@ -26,11 +28,13 @@ def capture_image():
         return None
 
     # Display the captured frame to check if it's working
-    cv2.imshow("Captured Frame", frame)
+    cv2.imshow("Captured Frame", cv2.resize(frame, (960, 540)))  # Resize for display
     cv2.waitKey(500)  # Display for 0.5 seconds
     cv2.destroyAllWindows()
 
-    image_path = "webcam_image.png"
+    # Generate a timestamp-based filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    image_path = f"webcam_image_{timestamp}.png"
     cv2.imwrite(image_path, frame)  # Save the captured frame
     
     # Release the camera after capture
