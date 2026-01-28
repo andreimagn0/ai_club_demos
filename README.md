@@ -1,1 +1,1 @@
-# ai_club_emotion_demo
+# ai_club_demos
