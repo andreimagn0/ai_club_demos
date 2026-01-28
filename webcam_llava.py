@@ -2,110 +2,175 @@ import cv2
 import base64
 import time
 import requests
-import json  # Import the correct JSON module
-import os
-from datetime import datetime
+import json
+import threading
 
-# Function to capture image from webcam
-def capture_image():
-    # Open the webcam with DSHOW backend (use MSMF if DSHOW doesn't work)
-    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+LLAVA_URL = "http://localhost:11434/api/generate"
+DESCRIPTION = "Starting..."
 
-    # Set camera resolution to Full HD (1920x1080)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+FONT = cv2.FONT_HERSHEY_SIMPLEX
+FONT_SCALE = 1.0
+FONT_THICKNESS = 2
+PADDING = 15
+LINE_SPACING = 8
+ANALYZING = False
 
-    # Allow the camera time to initialize (2 seconds)
-    time.sleep(2)
+def image_to_base64(frame):
+    _, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    return base64.b64encode(buffer).decode("utf-8")
 
-    # Discard the first few frames to let the camera stabilize
-    for i in range(10):
-        ret, frame = cap.read()
+def analyze_frame(frame):
+    global DESCRIPTION, ANALYZING
+    if ANALYZING:
+        return
 
-    if not ret:
-        print("Failed to grab frame")
-        cap.release()
-        return None
-
-    # Display the captured frame to check if it's working
-    cv2.imshow("Captured Frame", cv2.resize(frame, (960, 540)))  # Resize for display
-    cv2.waitKey(500)  # Display for 0.5 seconds
-    cv2.destroyAllWindows()
-
-    # Generate a timestamp-based filename
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    image_path = f"webcam_image_{timestamp}.png"
-    cv2.imwrite(image_path, frame)  # Save the captured frame
-    
-    # Release the camera after capture
-    cap.release()
-    return image_path
-
-# Function to convert image to base64
-def image_to_base64(image_path):
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
-
-# Function to send image to LLaVA and get description
-def send_to_llava(image_base64):
-    url = "http://localhost:11434/api/generate"
-    payload = {
-        "model": "llava",
-        "prompt": "What's in this image?",
-        "images": [image_base64]
-    }
-    headers = {"Content-Type": "application/json"}
-    
+    ANALYZING = True
     try:
-        response = requests.post(url, json=payload, headers=headers, stream=True)
-        
-        full_response = ""
-        
-        # Read the response stream line by line
+        frame = cv2.resize(frame, (512, 512))
+        img_b64 = image_to_base64(frame)
+
+        payload = {
+            "model": "llava",
+            "prompt": (
+                "Describe this image in one sentence. Do not bring up any sensitive topics, such as race, gender, etc."
+            ),
+            "images": [img_b64],
+            "options": {
+                "num_predict": 50,
+                "temperature": 0.5,
+                "top_p": 0.6,
+                "repeat_penalty": 1.1,
+                "stop": ["\n"]
+            }
+        }
+
+        response = requests.post(LLAVA_URL, json=payload, stream=True)
+        text = ""
+
         for line in response.iter_lines():
             if line:
-                decoded_line = line.decode('utf-8')
-                print(f"Raw line: {decoded_line}")  # Debugging output
-                try:
-                    # Parse each line as JSON using the correct json module
-                    json_line = json.loads(decoded_line)
-                    full_response += json_line.get("response", "")
-                    # Check if the response is completed
-                    if json_line.get("done", False):
-                        break
-                except Exception as e:
-                    print(f"Error processing line: {e}")
-                    print(f"Full response so far: {full_response}")  # Print the response so far
-                    return "Invalid JSON response"
-        
-        return full_response
-    
-    except Exception as e:
-        print(f"Error: {e}")
-        return "Error in sending request"
+                data = json.loads(line.decode())
+                text += data.get("response", "")
+                if data.get("done"):
+                    break
 
-# Main function to capture and describe images every 20 seconds
+        DESCRIPTION = text.strip()
+
+    except Exception as e:
+        DESCRIPTION = f"Error: {e}"
+
+    ANALYZING = False
+
+def draw_text_box(frame, text, max_width_ratio=0.85, bottom_margin=60):
+    h, w, _ = frame.shape
+    max_width = int(w * max_width_ratio)
+
+    words = text.split(" ")
+    lines = []
+    current_line = ""
+
+    # ---- WORD WRAP ----
+    for word in words:
+        test_line = current_line + (" " if current_line else "") + word
+        (line_width, line_height), _ = cv2.getTextSize(
+            test_line, FONT, FONT_SCALE, FONT_THICKNESS
+        )
+
+        if line_width <= max_width:
+            current_line = test_line
+        else:
+            lines.append(current_line)
+            current_line = word
+
+    if current_line:
+        lines.append(current_line)
+
+    # ---- MEASURE BOX ----
+    line_height = cv2.getTextSize(
+        "Ag", FONT, FONT_SCALE, FONT_THICKNESS
+    )[0][1]
+
+    box_width = 0
+    for line in lines:
+        (lw, _), _ = cv2.getTextSize(line, FONT, FONT_SCALE, FONT_THICKNESS)
+        box_width = max(box_width, lw)
+
+    box_height = (
+        len(lines) * line_height
+        + (len(lines) - 1) * LINE_SPACING
+        + PADDING * 2
+    )
+
+    # ---- CENTER HORIZONTALLY, BOTTOM POSITION ----
+    x = (w - box_width) // 2
+    y = h - bottom_margin - box_height + line_height
+
+    top_left = (x - PADDING, y - line_height - PADDING)
+    bottom_right = (x + box_width + PADDING, y + box_height - line_height)
+
+    # ---- DRAW BOX ----
+    cv2.rectangle(frame, top_left, bottom_right, (0, 0, 0), -1)
+
+    # ---- DRAW TEXT ----
+    y_offset = y
+    for line in lines:
+        cv2.putText(
+            frame,
+            line,
+            (x, y_offset),
+            FONT,
+            FONT_SCALE,
+            (255, 255, 255),
+            FONT_THICKNESS,
+            cv2.LINE_AA
+        )
+        y_offset += line_height + LINE_SPACING
+
+
 def main():
+    global DESCRIPTION
+
+    cap = cv2.VideoCapture(0)
+
+    # ---- FULLSCREEN WINDOW ----
+    cv2.namedWindow("Real-Time LLaVA", cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(
+        "Real-Time LLaVA",
+        cv2.WND_PROP_FULLSCREEN,
+        cv2.WINDOW_FULLSCREEN
+    )
+
+    last_sent = 0
+    ANALYSIS_INTERVAL = 6 # seconds
+
     while True:
-        # Capture an image from the webcam
-        image_path = capture_image()
-        
-        if image_path:
-            # Convert the captured image to base64
-            image_base64 = image_to_base64(image_path)
-            
-            # Send the base64 image to LLaVA and get the description
-            description = send_to_llava(image_base64)
-            
-            # Write the description to a text file
-            with open("llava_output.txt", "a") as file:
-                file.write(f"{time.ctime()}: {description}\n")
-            
-            # Print the description for debugging
-            print(f"{time.ctime()}: {description}")
-        
-        # Wait for 20 seconds before capturing the next image
-        time.sleep(20)
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # ---- MIRROR CAMERA ----
+        frame = cv2.flip(frame, 1)
+
+        # Trigger LLaVA periodically (non-blocking)
+        if time.time() - last_sent > ANALYSIS_INTERVAL:
+            last_sent = time.time()
+            threading.Thread(
+                target=analyze_frame,
+                args=(frame.copy(),),
+                daemon=True
+            ).start()
+
+        # ---- DRAW TEXT BOX ----
+        draw_text_box(frame, DESCRIPTION)
+
+        cv2.imshow("Real-Time LLaVA", frame)
+
+        key = cv2.waitKey(1)
+        if key == 27 or key == ord("q"):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
